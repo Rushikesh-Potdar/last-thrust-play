@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
+		<title>Last Thrust</title>
+		<!--
+			The tab icon: the craft, in the game's own colours, on the void.
+
+			It is here because a page that declares NO icon does not simply get a blank
+			one. The browser falls back to whatever it already has cached for the HOST,
+			and on GitHub Pages every project under an account shares a single origin —
+			so this game was showing the Godot robot inherited from a sibling site. An
+			icon of our own is the only thing that overrides that.
+
+			Inlined as a data URI rather than shipped as a file: YouTube measures the
+			bundle on both count and bytes, and a real favicon would be a tenth file and
+			a tenth request for 700 bytes of artwork. It also saves a copy step in
+			build_web.sh and an entry in deploy_pages.sh's guard, which is two more
+			places to forget. Only "#" has to be escaped, as %23 — everything else is
+			literal, so the shape stays legible here.
+
+			Drawn at 32 and checked down to 16, which is the size a favicon actually
+			lives at: the craft is scaled to 1.24 within the tile because at its natural
+			size the padding around it turned the whole thing to mush.
+		-->
+		<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230d0d1f'/><g transform='translate(16 16) scale(1.24) translate(-16 -16)'><path d='M13.2 20H18.8L16 28.6Z' fill='%23ff9440'/><path d='M14.5 20H17.5L16 26Z' fill='%23ffd08a'/><path d='M9.2 21.6h2.5M20.3 21.6h2.5' stroke='%23c7cfe6' stroke-width='2' stroke-linecap='round'/><path d='M11.6 17l-1.15 4.6M20.4 17l1.15 4.6' stroke='%23707894' stroke-width='1.6' stroke-linecap='round'/><polygon points='16,5.2 22,8.8 23.2,15.4 19,20.2 13,20.2 8.8,15.4 10,8.8' fill='%23c7cfe6' stroke='%23707894' stroke-width='1' stroke-linejoin='round'/><path d='M10.3 12.7h11.4' stroke='%23ffb84d' stroke-width='2'/><circle cx='16' cy='9.5' r='2.6' fill='%2373d9ff'/></g></svg>">
+		<style>
+/*
+ * Loading screen for the Playables bundle.
+ *
+ * Replaces Godot's stock <progress> bar, which is a grey browser widget on a grey
+ * field and reads as a page that failed rather than a game that is coming. This one
+ * is the game's own scene: the drawn craft from lander.gd descending toward a pad,
+ * over the star field and rock colours the mode actually uses.
+ *
+ * EVERY animation here is transform or opacity only, and every one starts at first
+ * paint. That is a hard constraint, not a style: the 39 MB wasm is compiled on the
+ * main thread, and for those seconds nothing else on it runs. Animations already
+ * running on compositor-only properties keep going through the freeze; anything
+ * driven by width, stroke-dashoffset, filters or JS timers stops dead mid-load,
+ * which looks exactly like the crash we are trying not to look like.
+ */
+
+html, body, #canvas {
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+body {
+	color: white;
+	/* The void colour from project.godot's default_clear_color, not the
+	 * #242424 placeholder — that one carries the boot-splash setting,
+	 * which this project never set, so it resolves to Godot's grey #242424. Grey is
+	 * what shows in the letterbox bars once the game is up, and around the loading
+	 * screen for the one frame before the overlay paints. */
+	background-color: #0d0d1f;
+	overflow: hidden;
+	touch-action: none;
+}
+
+#canvas {
+	display: block;
+}
+
+#canvas:focus {
+	outline: none;
+}
+
+/* ---------------------------------------------------------------- palette --- */
+/* Taken from the scripts that draw these things, so the loader and the first
+ * frame of the game are the same picture: lander.gd for the craft,
+ * landing_terrain.gd for the ground and pad, landing_sky.gd for the stars.
+ *
+ * Only the colours the CSS itself needs are vars. The rest of the palette lives as
+ * literals on the SVG below, because a presentation attribute like fill="" cannot
+ * take a var() — restating them here would be a second copy to keep in step. */
+:root {
+	--void: #0d0d1f;       /* project.godot default_clear_color */
+	--rock: #3d3d4d;       /* landing_terrain.gd rock */
+	--pad: #73ffa6;        /* landing_terrain.gd PAD_COLOR */
+	--trim: #ffb84d;       /* lander.gd TRIM */
+	--star: #d9e6ff;       /* landing_sky.gd star tint */
+	--edge: rgba(92, 140, 235, 0.45);   /* menu_theme.tres button border */
+	--dim: #9aa2b8;
+	/* Orbitron for words, the system's own face for numbers: Orbitron mis-shapes an
+	 * isolated "0", which is the first thing this screen prints. The game splits its
+	 * fonts the same way (see landing.gd::_style_hud). */
+	--font-display: 'Orbitron', 'Trebuchet MS', system-ui, sans-serif;
+	--font-ui: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@font-face {
+	font-family: 'Orbitron';
+	/* Copied into the bundle by tools/build_web.sh. `swap` because the title must be
+	 * on screen at first paint whether or not this 38 KB file has landed. */
+	src: url('orbitron.ttf') format('truetype');
+	font-weight: 400 900;
+	font-display: swap;
+}
+
+/* ------------------------------------------------------------- the screen --- */
+
+#status {
+	position: fixed;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	/* Lit from the horizon up, so the ground the craft is heading for is the
+	 * brightest thing on screen. */
+	background:
+		radial-gradient(90% 52% at 50% 100%, #1a2038 0%, rgba(13, 13, 31, 0) 72%),
+		var(--void);
+	overflow: hidden;
+	z-index: 10;
+	transition: opacity 0.45s ease, transform 0.45s ease;
+}
+
+#status.lt-done {
+	opacity: 0;
+	transform: scale(1.03);
+	pointer-events: none;
+}
+
+#boot {
+	position: relative;
+	width: 100%;
+	max-width: 460px;
+	padding: 0 24px;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+#boot.lt-hide {
+	display: none;
+}
+
+/* ---------------------------------------------------------------- the sky --- */
+
+#lt-sky {
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+}
+
+#lt-sky i {
+	position: absolute;
+	border-radius: 50%;
+	background: var(--star);
+	opacity: var(--o);
+	animation: lt-twinkle linear infinite;
+	will-change: opacity;
+}
+
+@keyframes lt-twinkle {
+	0%, 100% { opacity: var(--o); }
+	50% { opacity: calc(var(--o) * 0.2); }
+}
+
+/* One meteor, on a long cycle. It is the only thing on the screen that crosses it,
+ * so it catches the eye exactly once per pass instead of becoming wallpaper. */
+#lt-meteor {
+	position: fixed;
+	top: 12%;
+	left: -12%;
+	width: 130px;
+	height: 2px;
+	border-radius: 2px;
+	background: linear-gradient(90deg, rgba(217, 230, 255, 0), var(--star));
+	opacity: 0;
+	transform: rotate(22deg);
+	animation: lt-meteor 9s ease-in infinite;
+	animation-delay: 2.4s;
+	pointer-events: none;
+	will-change: transform, opacity;
+}
+
+@keyframes lt-meteor {
+	0% { transform: translate3d(0, 0, 0) rotate(22deg); opacity: 0; }
+	4% { opacity: 0.9; }
+	18% { transform: translate3d(78vw, 32vh, 0) rotate(22deg); opacity: 0; }
+	100% { transform: translate3d(78vw, 32vh, 0) rotate(22deg); opacity: 0; }
+}
+
+/* -------------------------------------------------------------- the scene --- */
+
+#lt-stage {
+	position: relative;
+	width: 100%;
+	/* Tall enough for a descent to read as a descent, short enough to leave the
+	 * title and gauge on screen on a landscape desktop frame. */
+	height: min(46vh, 300px);
+	margin-bottom: 26px;
+}
+
+/* The ground is three layers, and the split is what lets one scene serve a 375 px
+ * phone and a 1100 px desktop frame:
+ *
+ *   #lt-ground  the skyline, stretched to the full viewport width. Terrain is the
+ *               one thing here that may be stretched — wider hills still read as
+ *               hills — and non-scaling-stroke keeps the lit rim a hairline while
+ *               it is. Anchored to the stage, not the viewport, so it stays under
+ *               the craft at every size.
+ *   #lt-crust   everything below the skyline: a flat continuation of the rock that
+ *               sinks into the void. The same thing landing_terrain.gd does with
+ *               LIT_BAND, and it means the ground has no bottom edge to see.
+ *   #lt-pad     the pad itself, at a FIXED size — it is the one part of the ground
+ *               drawn to the craft's scale, and stretching it would put a 200 px
+ *               landing zone under a 132 px lander.
+ *
+ * Both full-width layers break out of the 460 px text column with the
+ * left/width/margin trick rather than being pinned to the viewport, so their
+ * vertical placement stays tied to the stage they belong to. */
+#lt-ground, #lt-crust {
+	position: absolute;
+	left: 50%;
+	width: 100vw;
+	margin-left: -50vw;
+}
+
+#lt-ground {
+	bottom: 22%;
+	height: 28%;
+	display: block;
+}
+
+#lt-crust {
+	bottom: 0;
+	height: 22%;
+	background: linear-gradient(180deg, var(--rock) 0%, #2c2c39 40%, var(--void) 100%);
+}
+
+#lt-pad {
+	position: absolute;
+	left: 50%;
+	width: 150px;
+	margin-left: -75px;
+	/* 37% is where the flat of the skyline lands; the 10px backs the pad's own
+	 * baseline out of its artwork, so the green line sits on the rock rather than
+	 * floating over it. */
+	bottom: calc(37% - 10px);
+	display: block;
+}
+
+/* Light pooling on the pad from the engine. Sold with opacity alone. */
+#lt-pool {
+	animation: lt-pool 1.9s ease-in-out infinite;
+	transform-origin: center;
+	will-change: opacity;
+}
+
+@keyframes lt-pool {
+	0%, 100% { opacity: 0.30; }
+	50% { opacity: 0.62; }
+}
+
+#lt-pad-light-a, #lt-pad-light-b {
+	animation: lt-blink 1.4s steps(1, end) infinite;
+	will-change: opacity;
+}
+
+#lt-pad-light-b {
+	animation-delay: 0.7s;
+}
+
+@keyframes lt-blink {
+	0%, 49% { opacity: 1; }
+	50%, 100% { opacity: 0.18; }
+}
+
+/* --------------------------------------------------------------- the craft --- */
+
+#lt-ship {
+	position: absolute;
+	left: 50%;
+	top: 2%;
+	/* Sized against the pad below it, not against the stage: at 132 px the plume
+	 * reached the pad and read as a craft already down. */
+	width: 116px;
+	margin-left: -58px;
+	/* Two periods that do not divide into each other, so the craft never settles
+	 * into a loop the eye can predict — the same reason the drift in lander.gd is
+	 * driven off a separate clock from the bob. */
+	animation: lt-hover 3.4s ease-in-out infinite;
+	will-change: transform;
+}
+
+@keyframes lt-hover {
+	0%, 100% { transform: translate3d(0, -7px, 0); }
+	50% { transform: translate3d(0, 9px, 0); }
+}
+
+#lt-tilt {
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: lt-tilt 5.1s ease-in-out infinite;
+	will-change: transform;
+}
+
+@keyframes lt-tilt {
+	0%, 100% { transform: rotate(-5.5deg); }
+	50% { transform: rotate(5.5deg); }
+}
+
+#lt-flame {
+	transform-box: fill-box;
+	/* Grows downward out of the nozzle, never off its own middle. */
+	transform-origin: top center;
+	animation: lt-burn 0.19s ease-in-out infinite alternate;
+	will-change: transform, opacity;
+}
+
+@keyframes lt-burn {
+	from { transform: scale(0.82, 0.66); opacity: 0.72; }
+	to { transform: scale(1.06, 1.12); opacity: 1; }
+}
+
+#lt-flame-core {
+	transform-box: fill-box;
+	transform-origin: top center;
+	animation: lt-burn-core 0.13s ease-in-out infinite alternate;
+	will-change: transform;
+}
+
+@keyframes lt-burn-core {
+	from { transform: scaleY(0.7); }
+	to { transform: scaleY(1.15); }
+}
+
+/* --------------------------------------------------------------- the title --- */
+
+#lt-title {
+	margin: 0;
+	font-family: var(--font-display);
+	/* Sized to keep the name on one line at 320 px, tracking included. */
+	font-size: clamp(19px, 6.4vw, 38px);
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.20em;
+	/* Optical centring: letter-spacing hangs a gap off the last glyph. */
+	text-indent: 0.20em;
+	color: #eef3ff;
+	text-align: center;
+	text-shadow: 0 0 22px rgba(115, 217, 255, 0.35), 0 2px 0 rgba(0, 0, 0, 0.5);
+	animation: lt-glow 4.2s ease-in-out infinite;
+}
+
+@keyframes lt-glow {
+	0%, 100% { opacity: 0.86; }
+	50% { opacity: 1; }
+}
+
+/* --------------------------------------------------------------- the gauge --- */
+
+#lt-gauge {
+	position: relative;
+	width: 100%;
+	height: 14px;
+	margin-top: 22px;
+	border: 2px solid var(--edge);
+	border-radius: 999px;
+	background: rgba(7, 9, 18, 0.72);
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
+#lt-fill {
+	position: absolute;
+	inset: 0;
+	right: auto;
+	width: 0;
+	border-radius: 999px;
+	background: linear-gradient(90deg, var(--trim), var(--pad));
+	box-shadow: 0 0 14px rgba(115, 255, 166, 0.55);
+	transition: width 0.25s linear;
+}
+
+/* Tick marks over the fill, so a moving edge is legible as a quantity and not just
+ * a glowing smear. */
+#lt-ticks {
+	position: absolute;
+	inset: 0;
+	background: repeating-linear-gradient(90deg,
+		rgba(7, 9, 18, 0) 0 9px,
+		rgba(7, 9, 18, 0.55) 9px 11px);
+	pointer-events: none;
+}
+
+/* The sweep only runs while there is no number to show: before the first progress
+ * callback, and again during the wasm compile after the last one. */
+#lt-sweep {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 38%;
+	background: linear-gradient(90deg,
+		rgba(115, 217, 255, 0), rgba(115, 217, 255, 0.5), rgba(115, 217, 255, 0));
+	opacity: 0;
+	transform: translate3d(-100%, 0, 0);
+	will-change: transform;
+}
+
+#lt-gauge.lt-indeterminate #lt-sweep {
+	opacity: 1;
+	animation: lt-sweep 1.25s ease-in-out infinite;
+}
+
+@keyframes lt-sweep {
+	from { transform: translate3d(-110%, 0, 0); }
+	to { transform: translate3d(300%, 0, 0); }
+}
+
+#lt-readout {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	width: 100%;
+	margin-top: 10px;
+	font-family: var(--font-ui);
+	font-size: 12px;
+	letter-spacing: 0.14em;
+	color: var(--dim);
+}
+
+#lt-pct {
+	color: var(--pad);
+}
+
+#lt-tip {
+	margin-top: 18px;
+	min-height: 1em;
+	font-family: var(--font-ui);
+	font-size: 11px;
+	letter-spacing: 0.1em;
+	color: rgba(154, 162, 184, 0.75);
+	text-align: center;
+}
+
+/* ------------------------------------------------------------- the failure --- */
+
+#status-notice {
+	display: none;
+	background-color: #2a1420;
+	border: 2px solid #9b3943;
+	border-radius: 14px;
+	color: #f0dede;
+	font-family: var(--font-ui);
+	font-size: 13px;
+	line-height: 1.45;
+	margin: 0 24px;
+	max-width: 460px;
+	overflow: hidden;
+	padding: 18px;
+	text-align: center;
+	z-index: 1;
+}
+
+/* A landscape desktop frame has little vertical room; drop the scene first, since
+ * the gauge is the part carrying information. */
+@media (max-height: 520px) {
+	#lt-stage { height: 40vh; margin-bottom: 14px; }
+	#lt-ship { width: 92px; margin-left: -46px; }
+	#lt-tip { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#lt-sky i, #lt-meteor, #lt-pool, #lt-pad-light-a, #lt-pad-light-b,
+	#lt-ship, #lt-tilt, #lt-flame, #lt-flame-core, #lt-title, #lt-sweep {
+		animation: none !important;
+	}
+	#lt-meteor { display: none; }
+	#status { transition: opacity 0.2s ease; }
+}
+		</style>
+		<script src="https://www.youtube.com/game_api/v1"></script>
+<script src="YTGameSDK.js"></script>
+
+	</head>
+	<body>
+		<canvas id="canvas">
+			Your browser does not support the canvas tag.
+		</canvas>
+
+		<noscript>
+			Your browser does not support JavaScript.
+		</noscript>
+
+		<div id="status">
+			<div id="lt-sky"></div>
+			<div id="lt-meteor"></div>
+
+			<div id="boot">
+				<div id="lt-stage">
+					<!-- The ground: a random walk with one pad flattened into it, the same
+					     shape landing_terrain.gd carves, and its colours. -->
+					<!-- The skyline. viewBox units are horizontal-only here: this one is
+					     stretched to the viewport, so read the x numbers as fractions of the
+					     width and the y numbers as the fixed relief. The flat run from 405 to
+					     595 is the plateau the pad sits on. It is that wide because the pad is
+					     drawn at a fixed 66 px: 190 units is 71 px on a 375 px phone, which is
+					     the narrowest frame where the pad still lands inside its own plateau. -->
+					<svg id="lt-ground" viewBox="0 0 1000 90" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+						<path fill="#3d3d4d" d="M0,58 L55,50 L105,62 L160,46 L215,36 L265,50 L320,30 L370,44 L405,42 L595,42 L630,52 L675,38 L720,48 L780,34 L840,58 L895,44 L950,64 L1000,54 L1000,90 L0,90 Z"/>
+						<!-- Crater dressing, in the deep tone, sunk into the surface. -->
+						<ellipse cx="150" cy="78" rx="26" ry="6" fill="#292936"/>
+						<ellipse cx="330" cy="66" rx="18" ry="4" fill="#292936"/>
+						<ellipse cx="690" cy="70" rx="22" ry="5" fill="#292936"/>
+						<ellipse cx="880" cy="80" rx="24" ry="5.5" fill="#292936"/>
+						<!-- Lit rim along the skyline: the one bright edge, so the horizon
+						     reads as a surface rather than a hole in the sky. Kept a hairline
+						     by hand, because the stretch would otherwise squash it flat. -->
+						<polyline fill="none" stroke="#9ea8c7" stroke-width="2" stroke-linejoin="round"
+							vector-effect="non-scaling-stroke"
+							points="0,58 55,50 105,62 160,46 215,36 265,50 320,30 370,44 405,42 595,42 630,52 675,38 720,48 780,34 840,58 895,44 950,64 1000,54"/>
+					</svg>
+					<div id="lt-crust"></div>
+
+					<!-- The pad, in landing_terrain.gd's pad green, at the craft's own scale. -->
+					<svg id="lt-pad" viewBox="0 0 150 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+						<defs>
+							<!-- Engine light pooling on the pad. A radial falloff, not a flat
+							     ellipse: light thrown from a nozzle has no edge, and a hard
+							     one reads as a painted orange disc lying on the rock. -->
+							<radialGradient id="lt-pool-grad">
+								<stop offset="0%" stop-color="#ffb84d" stop-opacity="0.55"/>
+								<stop offset="55%" stop-color="#ff9440" stop-opacity="0.22"/>
+								<stop offset="100%" stop-color="#ff9440" stop-opacity="0"/>
+							</radialGradient>
+						</defs>
+						<ellipse id="lt-pool" cx="75" cy="30" rx="62" ry="13" fill="url(#lt-pool-grad)"/>
+						<line x1="42" y1="30" x2="108" y2="30" stroke="#73ffa6" stroke-width="2.5" stroke-linecap="round" opacity="0.8"/>
+						<circle id="lt-pad-light-a" cx="42" cy="25" r="3.2" fill="#73ffa6"/>
+						<circle id="lt-pad-light-b" cx="108" cy="25" r="3.2" fill="#73ffa6"/>
+					</svg>
+
+					<!-- The craft, point for point from lander.gd::_draw. -->
+					<svg id="lt-ship" viewBox="-40 -34 80 104" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+						<g id="lt-tilt">
+							<g id="lt-flame">
+								<path fill="#ff9440" opacity="0.85" d="M-9,30 L9,30 L4,64 L0,70 L-4,64 Z"/>
+								<path fill="#ffb84d" d="M-6.5,30 L6.5,30 L3,54 L0,59 L-3,54 Z"/>
+								<path id="lt-flame-core" fill="#fff0c2" d="M-3.4,30 L3.4,30 L1.6,44 L0,47 L-1.6,44 Z"/>
+							</g>
+							<!-- Legs before the tank, so the struts sit behind it. -->
+							<g stroke="#707894" stroke-linecap="round" fill="none">
+								<path stroke-width="4" d="M-20,6 L-27,30 M20,6 L27,30"/>
+								<path stroke-width="3" d="M-9,16 L-27,30 M9,16 L27,30"/>
+							</g>
+							<path stroke="#c7cfe6" stroke-width="5" stroke-linecap="round" d="M-34,30 L-20,30 M20,30 L34,30"/>
+							<polygon fill="#707894" points="-7,22 7,22 11,32 -11,32"/>
+							<polygon fill="#c7cfe6" stroke="#707894" stroke-width="2" stroke-linejoin="round"
+								points="0,-26 20,-14 24,8 10,24 -10,24 -24,8 -20,-14"/>
+							<line x1="-22" y1="-2" x2="22" y2="-2" stroke="#ffb84d" stroke-width="3"/>
+							<circle cx="0" cy="-12" r="7" fill="#73d9ff"/>
+						</g>
+					</svg>
+				</div>
+
+				<h1 id="lt-title">Last Thrust</h1>
+
+				<div id="lt-gauge" class="lt-indeterminate">
+					<div id="lt-fill"></div>
+					<div id="lt-ticks"></div>
+					<div id="lt-sweep"></div>
+				</div>
+
+				<div id="lt-readout" aria-live="polite">
+					<span id="lt-phase">ESTABLISHING LINK</span>
+					<span id="lt-pct"></span>
+				</div>
+
+				<div id="lt-tip"></div>
+			</div>
+
+			<div id="status-notice"></div>
+		</div>
+
+		<script>
+/* The star field is scattered rather than authored: 110 hand-placed dots would be a
+ * lot of markup to hand-tune, and landing_sky.gd scatters its own for the same
+ * reason. Each dot's twinkle is a compositor-side opacity animation started here,
+ * before any of the engine's work begins, so it survives the wasm compile. */
+(function () {
+	const sky = document.getElementById('lt-sky');
+	const parts = [];
+	for (let i = 0; i < 54; i++) {
+		const size = (0.9 + Math.random() * 1.5).toFixed(2);
+		const bright = (0.25 + Math.random() * 0.6).toFixed(2);
+		parts.push('<i style="'
+			+ 'left:' + (Math.random() * 100).toFixed(2) + '%;'
+			+ 'top:' + (Math.random() * 100).toFixed(2) + '%;'
+			+ 'width:' + size + 'px;height:' + size + 'px;'
+			+ '--o:' + bright + ';'
+			+ 'animation-duration:' + (2.2 + Math.random() * 4.5).toFixed(2) + 's;'
+			+ 'animation-delay:-' + (Math.random() * 6).toFixed(2) + 's">'
+			+ '</i>');
+	}
+	sky.innerHTML = parts.join('');
+
+	/* Teach the controls while the bytes come down. The game has a HOW TO PLAY panel
+	 * of its own (scripts/landing_guide.gd), but it is sealed inside the bundle this
+	 * screen is still fetching, and this is the one screen with a spare few seconds
+	 * on it either way. Keyed off the pointer, because the answer is genuinely
+	 * different: landing needs tilt and burn at the same time, which is two fingers
+	 * on a phone and, on a desktop, the cursor's position and its button. The game
+	 * reads the same `(pointer: coarse)` test to decide whether to draw its thumb pad
+	 * at all (LandingControls.touch_primary), and the guide reads it to decide which
+	 * scheme to draw, so the hint and the controls the player then gets cannot
+	 * disagree.
+	 *
+	 * The desktop line names BOTH schemes, unlike every other place that teaches the
+	 * controls. Those can ask which one is live; this cannot. The preference lives in
+	 * the save, the save is behind the engine, and the engine is the thing still
+	 * downloading while this is on screen -- so naming one scheme here would be a
+	 * guess, and a player who has switched the mouse off would be told to use it. */
+	document.getElementById('lt-tip').textContent =
+		window.matchMedia('(pointer: coarse)').matches
+			? 'HOLD TILT AND THRUST TOGETHER · LAND ON THE GREEN'
+			: 'MOUSE OR A / D TO LEAN · CLICK OR SPACE TO THRUST';
+}());
+		</script>
+
+		<script src="index.js"></script>
+		<script>
+const GODOT_CONFIG = {"args":[],"canvasResizePolicy":2,"emscriptenPoolSize":8,"ensureCrossOriginIsolationHeaders":false,"executable":"index","experimentalVK":false,"fileSizes":{"index.pck":214860,"index.wasm":39513091},"focusCanvas":true,"gdextensionLibs":[],"godotPoolSize":4};
+const GODOT_THREADS_ENABLED = false;
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const statusOverlay = document.getElementById('status');
+	const statusNotice = document.getElementById('status-notice');
+	const boot = document.getElementById('boot');
+	const gauge = document.getElementById('lt-gauge');
+	const fill = document.getElementById('lt-fill');
+	const phase = document.getElementById('lt-phase');
+	const pct = document.getElementById('lt-pct');
+
+	let initializing = true;
+	let statusMode = '';
+
+	/* Report what is actually happening. The download is measured, so it gets a
+	 * number; the compile that follows it is not, so it gets the sweep and no
+	 * number rather than a fake number that would sit at 99% for four seconds. */
+	function setProgress(current, total) {
+		if (!initializing) {
+			return;
+		}
+		if (current > 0 && total > 0) {
+			const frac = Math.min(current / total, 1);
+			gauge.classList.remove('lt-indeterminate');
+			fill.style.width = (frac * 100).toFixed(1) + '%';
+			if (frac >= 1) {
+				setPhase('IGNITION SEQUENCE', true);
+			} else {
+				phase.textContent = 'FUELLING';
+				pct.textContent = Math.floor(frac * 100) + '%';
+			}
+		} else {
+			setPhase('SPOOLING ENGINES', true);
+		}
+	}
+
+	function setPhase(text, indeterminate) {
+		phase.textContent = text;
+		pct.textContent = '';
+		if (indeterminate) {
+			gauge.classList.add('lt-indeterminate');
+			fill.style.width = '100%';
+		}
+	}
+
+	function setStatusMode(mode) {
+		if (statusMode === mode || !initializing) {
+			return;
+		}
+		if (mode === 'hidden') {
+			/* Fade instead of yanking the overlay, but hand input to the canvas at
+			 * once: .lt-done sets pointer-events:none, so the fade never eats the
+			 * first tap. The node itself goes when the transition is over — and on a
+			 * timer rather than on transitionend, which never fires if the tab is
+			 * backgrounded mid-fade and would leave the loader up for good. */
+			statusOverlay.classList.add('lt-done');
+			initializing = false;
+			setTimeout(() => statusOverlay.remove(), 600);
+			return;
+		}
+		if (mode === 'notice') {
+			boot.classList.add('lt-hide');
+			statusNotice.style.display = 'block';
+		}
+		statusMode = mode;
+	}
+
+	function setStatusNotice(text) {
+		while (statusNotice.lastChild) {
+			statusNotice.removeChild(statusNotice.lastChild);
+		}
+		const lines = text.split('\n');
+		lines.forEach((line) => {
+			statusNotice.appendChild(document.createTextNode(line));
+			statusNotice.appendChild(document.createElement('br'));
+		});
+	}
+
+	function displayFailureNotice(err) {
+		console.error(err);
+		if (err instanceof Error) {
+			setStatusNotice(err.message);
+		} else if (typeof err === 'string') {
+			setStatusNotice(err);
+		} else {
+			setStatusNotice('An unknown error occurred.');
+		}
+		setStatusMode('notice');
+		initializing = false;
+	}
+
+	const missing = Engine.getMissingFeatures({
+		threads: GODOT_THREADS_ENABLED,
+	});
+
+	if (missing.length !== 0) {
+		if (GODOT_CONFIG['serviceWorker'] && GODOT_CONFIG['ensureCrossOriginIsolationHeaders'] && 'serviceWorker' in navigator) {
+			let serviceWorkerRegistrationPromise;
+			try {
+				serviceWorkerRegistrationPromise = navigator.serviceWorker.getRegistration();
+			} catch (err) {
+				serviceWorkerRegistrationPromise = Promise.reject(new Error('Service worker registration failed.'));
+			}
+			// There's a chance that installing the service worker would fix the issue
+			Promise.race([
+				serviceWorkerRegistrationPromise.then((registration) => {
+					if (registration != null) {
+						return Promise.reject(new Error('Service worker already exists.'));
+					}
+					return registration;
+				}).then(() => engine.installServiceWorker()),
+				// For some reason, `getRegistration()` can stall
+				new Promise((resolve) => {
+					setTimeout(() => resolve(), 2000);
+				}),
+			]).then(() => {
+				// Reload if there was no error.
+				window.location.reload();
+			}).catch((err) => {
+				console.error('Error while registering service worker:', err);
+			});
+		} else {
+			// Display the message as usual
+			const missingMsg = 'Error\nThe following features required to run Godot projects on the Web are missing:\n';
+			displayFailureNotice(missingMsg + missing.join('\n'));
+		}
+	} else {
+		setStatusMode('progress');
+		engine.startGame({
+			'onProgress': setProgress,
+		}).then(() => {
+			setStatusMode('hidden');
+		}, displayFailureNotice);
+	}
+}());
+		</script>
+	</body>
+</html>
+
